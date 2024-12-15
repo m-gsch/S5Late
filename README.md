@@ -28,5 +28,5 @@ If the exploit ran succesfully now you can load unencrypted images without signa
 This exploits a vulnerability in DFU_DNLOAD packet parsing code, where no check exists for the total amount of bytes received. This means we can keep sending bytes until we overwrite some pointers at the end of SRAM.
 
 # Thanks
-q3k - for general help
-CUB3D - for ipod_sun
+- q3k - for general help
+- CUB3D - for ipod_sun
