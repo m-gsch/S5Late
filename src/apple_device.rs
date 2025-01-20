@@ -194,8 +194,9 @@ impl AppleDevice {
         }
         
         let upload_req_type = rusb::request_type(Direction::In, RequestType::Class, Recipient::Interface);
-        let _nbytes = self.handle.read_control(upload_req_type, 2, 0, 0, buffer, Duration::from_secs(5))?;
-        
+        let nbytes = self.handle.read_control(upload_req_type, 2, 0, 0, buffer, Duration::from_secs(5))?;
+        log::debug!("DFU_UPLOAD: Received {:#x} bytes {:x?}", nbytes, buffer);
+
         Ok(())
     }
 
@@ -206,8 +207,8 @@ impl AppleDevice {
 
         let mut status_buffer = vec![0u8; 6];
         let getstatus_req_type = rusb::request_type(Direction::In, RequestType::Class, Recipient::Interface);
-        let _nbytes = self.handle.read_control(getstatus_req_type, 3, 0, 0, &mut status_buffer, Duration::from_secs(5))?;
-        log::debug!("DFU_GETSTATUS: {:x?}", status_buffer);
+        let nbytes = self.handle.read_control(getstatus_req_type, 3, 0, 0, &mut status_buffer, Duration::from_secs(5))?;
+        log::debug!("DFU_GETSTATUS: Received {:#x} bytes {:x?}", nbytes, status_buffer);
 
         Ok(status_buffer)
     }
@@ -219,7 +220,8 @@ impl AppleDevice {
         }
 
         let clrstatus_req_type = rusb::request_type(Direction::Out, RequestType::Class, Recipient::Interface);
-        let _nbytes = self.handle.write_control(clrstatus_req_type, 4, 0, 0, &[], Duration::from_secs(5))?;
+        let nbytes = self.handle.write_control(clrstatus_req_type, 4, 0, 0, &[], Duration::from_secs(5))?;
+        log::debug!("DFU_CLRSTATUS: Sent {:#x} bytes", nbytes);
 
         Ok(())
     }
@@ -283,6 +285,8 @@ impl AppleDevice {
 
         let product_name = self.handle.read_string_descriptor_ascii(2)?;
 
+        log::debug!("Product name: {}", product_name);
+
         if product_name != "PWN DFU" {
             return Err(AppleDeviceError::Unknown);
         }
@@ -302,22 +306,26 @@ impl AppleDevice {
         let mut packets = 0u16;
         for chunk in buffer.chunks(0x800) {
             // DnLoad
-            let _nbytes =
+            let nbytes =
             self.handle
                 .write_control(dnload_req_type, 1, packets, 0, chunk,Duration::from_secs(5))?;
+            log::debug!("DFU_DNLOAD: Sent {:#x} bytes {:x?}", nbytes, chunk);
 
             // GetStatus
-            let _nbytes =
+            let nbytes =
             self.handle
                 .read_control(getstatus_req_type, 3, 0, 0, &mut status_buffer, Duration::from_secs(1))?;
+            log::debug!("DFU_GETSTATUS: Received {:#x} bytes {:x?}", nbytes, status_buffer);
             packets += 1;
         }
 
         // DnLoad
-        let _nbytes =self.handle.write_control(dnload_req_type, 1, packets+1, 0, &[],Duration::from_secs(5))?;
+        let nbytes =self.handle.write_control(dnload_req_type, 1, packets+1, 0, &[],Duration::from_secs(5))?;
+        log::debug!("DFU_DNLOAD: Sent {:#x} bytes", nbytes);
 
         // GetStatus
-        let _nbytes = self.handle.read_control(getstatus_req_type, 3, 0, 0, &mut status_buffer, Duration::from_secs(1))?;
+        let nbytes = self.handle.read_control(getstatus_req_type, 3, 0, 0, &mut status_buffer, Duration::from_secs(1))?;
+        log::debug!("DFU_GETSTATUS: Received {:#x} bytes {:x?}", nbytes, status_buffer);
         
         Ok(())
     }
