@@ -8,7 +8,7 @@ mod apple_device;
 #[command(version, about, long_about = None)]
 struct Cli {
     #[command(subcommand)]
-    command: Option<Commands>,
+    command: Commands,
 }
 
 #[derive(Subcommand)]
@@ -28,20 +28,28 @@ fn main() {
 
     // [NOTE] if we are getting RusbError(NotSupported) when connecting probably means that Windows loaded the Apple Driver
     // use Zadig(https://zadig.akeo.ie/) to replace with WinUSB
-    let ipod =
-        AppleDevice::in_mode(Mode::DFU).expect("Failed connecting to the iPod in DFU mode");
+    let ipod = match AppleDevice::in_mode(Mode::DFU) {
+        Ok(device) => device,
+        Err(e) => {
+            log::error!("Failed connecting to the iPod in DFU mode. {e}.");
+            return;
+        },
+    };
 
     log::info!("We found an Apple Device in {:?} mode.", ipod.mode);
 
     match cli.command {
-        Some(Commands::Hax) => {
-            ipod.hax().expect("Failed running the exploit");
-            log::info!("Succesfully exploited the device!");
+        Commands::Hax => {
+            match ipod.hax() {
+                Ok(_) => log::info!("Succesfully exploited the device!"),
+                Err(e) => log::error!("Failed running the exploit. {e}."),
+            }
         }
-        Some(Commands::Load { file_path }) => {
-            ipod.load_image_from_file(&file_path).expect("Failed loading the image");
-            log::info!("Image ({}) loaded to the device.",file_path);
+        Commands::Load { file_path } => {
+            match ipod.load_image_from_file(&file_path){
+                Ok(_) =>  log::info!("Image ({}) loaded to the device.", file_path),
+                Err(e) => log::error!("Failed loading the image. {e}."),
+            }
         }
-        None => {}
     }
 }

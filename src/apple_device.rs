@@ -1,8 +1,12 @@
 use rusb::{Direction, GlobalContext, Recipient, RequestType};
-use std::{fs::File, io::Read, iter, thread::sleep, time::Duration};
+use std::{error::{self, Error}, fmt, fs::File, io::Read, iter, thread::sleep, time::Duration};
 use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes};
-// Define a constant for the Apple Vendor ID
+
+// Apple USB Vendor ID
 const APPLE_VENDOR_ID: u16 = 0x05ac;
+
+// Max size that the boot ROM accepts on DFU download
+const MAX_IMAGE_SIZE: usize = 0x25000;
 
 #[derive(Debug)]
 pub enum AppleDeviceError {
@@ -18,6 +22,28 @@ pub enum AppleDeviceError {
     // We have no idea what happened
     Unknown,
 }
+
+impl fmt::Display for AppleDeviceError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            AppleDeviceError::RusbError(..) => write!(f, "Error in the rusb library [{}]",self.source().unwrap()),
+            AppleDeviceError::DeviceNotFound => write!(f, "iPod was not found in the connected USB devices"),
+            AppleDeviceError::WrongMode => write!(f, "iPod is not in the right mode for the requested operation"),
+            AppleDeviceError::File => write!(f, "Error dealing with a file"),
+            AppleDeviceError::Unknown => write!(f, "No idea what happened"),
+        }
+    }
+}
+
+impl error::Error for AppleDeviceError {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
+        match *self {
+            AppleDeviceError::RusbError(ref e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
 impl From<rusb::Error> for AppleDeviceError {
     fn from(e: rusb::Error) -> Self {
         AppleDeviceError::RusbError(e)
@@ -362,6 +388,11 @@ impl AppleDevice {
             Vec::from(buffer)
         };
 
+        if img_buffer.len() > MAX_IMAGE_SIZE {
+            log::error!("Binary exceeds the maximum size allowed by the boot ROM. Max: {:#x} Actual: {:#X}",MAX_IMAGE_SIZE, img_buffer.len());
+            return Err(AppleDeviceError::File);
+        }
+
         // Send the image in chunks
         for chunk in img_buffer.chunks(0x800) {
             self.dfu_dnload(chunk)?;
@@ -396,6 +427,7 @@ impl AppleDevice {
 
         if status != [0, 0xB8, 0xB, 0, 7, 0] {
             // Unknown error when loading the image
+            log::error!("Unexpected DFU status returned when loading the image.");
             return Err(AppleDeviceError::Unknown);
         }
 
