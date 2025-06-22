@@ -1,12 +1,20 @@
 use rusb::{Direction, GlobalContext, Recipient, RequestType};
-use std::{error::{self, Error}, fmt, fs::File, io::Read, iter, thread::sleep, time::Duration};
+use std::{
+    error::{self, Error},
+    fmt,
+    fs::File,
+    io::Read,
+    iter,
+    thread::sleep,
+    time::Duration,
+};
 use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes};
 
 // Apple USB Vendor ID
 const APPLE_VENDOR_ID: u16 = 0x05ac;
 
 // Max size that the boot ROM accepts on DFU download
-const MAX_IMAGE_SIZE: usize = 0x25000;
+const MAX_BOOTLOADER_SIZE: usize = 0x25000;
 
 #[derive(Debug)]
 pub enum AppleDeviceError {
@@ -26,9 +34,16 @@ pub enum AppleDeviceError {
 impl fmt::Display for AppleDeviceError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
-            AppleDeviceError::RusbError(..) => write!(f, "Error in the rusb library [{}]",self.source().unwrap()),
-            AppleDeviceError::DeviceNotFound => write!(f, "iPod was not found in the connected USB devices"),
-            AppleDeviceError::WrongMode => write!(f, "iPod is not in the right mode for the requested operation"),
+            AppleDeviceError::RusbError(..) => {
+                write!(f, "Error in the rusb library [{}]", self.source().unwrap())
+            }
+            AppleDeviceError::DeviceNotFound => {
+                write!(f, "iPod was not found in the connected USB devices")
+            }
+            AppleDeviceError::WrongMode => write!(
+                f,
+                "iPod is not in the right mode for the requested operation"
+            ),
             AppleDeviceError::File => write!(f, "Error dealing with a file"),
             AppleDeviceError::Unknown => write!(f, "No idea what happened"),
         }
@@ -55,6 +70,7 @@ pub enum Mode {
     DFU,
     WTF,
     DISK,
+    UBOOT,
     Unknown(u16),
 }
 
@@ -65,6 +81,7 @@ impl From<u16> for Mode {
             0x1249 => Mode::WTF,
             0x124A => Mode::WTF,
             0x1267 => Mode::DISK,
+            0x1288 => Mode::UBOOT,
             _ => Mode::Unknown(value),
         }
     }
@@ -209,26 +226,27 @@ impl AppleDevice {
         Ok(Self { mode, handle })
     }
 
-    fn dfu_dnload(&self, data: &[u8]) -> Result<(), AppleDeviceError> {
-        if self.mode != Mode::DFU {
-            return Err(AppleDeviceError::WrongMode);
-        }
-
+    fn dfu_dnload(&self, data: &[u8], chunk_index: u16) -> Result<(), AppleDeviceError> {
         let dnload_req_type =
             rusb::request_type(Direction::Out, RequestType::Class, Recipient::Interface);
-        let nbytes =
-            self.handle
-                .write_control(dnload_req_type, 1, 1, 0, data, Duration::from_secs(5))?;
-        log::debug!("DFU_DNLOAD: Sent {:#x} bytes {:x?}", nbytes, data);
+        let nbytes = self.handle.write_control(
+            dnload_req_type,
+            1,
+            chunk_index,
+            0,
+            data,
+            Duration::from_secs(5),
+        )?;
+        log::debug!(
+            "DFU_DNLOAD({chunk_index}): Sent {:#x} bytes {:x?}",
+            nbytes,
+            data
+        );
 
         Ok(())
     }
 
     fn dfu_upload(&self, buffer: &mut [u8]) -> Result<(), AppleDeviceError> {
-        if self.mode != Mode::DFU {
-            return Err(AppleDeviceError::WrongMode);
-        }
-
         let upload_req_type =
             rusb::request_type(Direction::In, RequestType::Class, Recipient::Interface);
         let nbytes =
@@ -240,10 +258,6 @@ impl AppleDevice {
     }
 
     fn dfu_getstatus(&self) -> Result<Vec<u8>, AppleDeviceError> {
-        if self.mode != Mode::DFU {
-            return Err(AppleDeviceError::WrongMode);
-        }
-
         let mut status_buffer = vec![0u8; 6];
         let getstatus_req_type =
             rusb::request_type(Direction::In, RequestType::Class, Recipient::Interface);
@@ -265,16 +279,23 @@ impl AppleDevice {
     }
 
     fn dfu_clrstatus(&self) -> Result<(), AppleDeviceError> {
-        if self.mode != Mode::DFU {
-            return Err(AppleDeviceError::WrongMode);
-        }
-
         let clrstatus_req_type =
             rusb::request_type(Direction::Out, RequestType::Class, Recipient::Interface);
         let nbytes =
             self.handle
                 .write_control(clrstatus_req_type, 4, 0, 0, &[], Duration::from_secs(5))?;
         log::debug!("DFU_CLRSTATUS: Sent {:#x} bytes", nbytes);
+
+        Ok(())
+    }
+
+    fn dfu_detach(&self) -> Result<(), AppleDeviceError> {
+        let clrstatus_req_type =
+            rusb::request_type(Direction::Out, RequestType::Class, Recipient::Interface);
+        let nbytes =
+            self.handle
+                .write_control(clrstatus_req_type, 0, 0, 0, &[], Duration::from_secs(5))?;
+        log::debug!("DFU_DETACH: Sent {:#x} bytes", nbytes);
 
         Ok(())
     }
@@ -325,15 +346,15 @@ impl AppleDevice {
         let mut data = vec![0u8; 0x780];
         let stub_code = include_bytes!("../assets/stub.bin");
         data[0x400..0x400 + stub_code.len()].copy_from_slice(stub_code);
-        self.dfu_dnload(&data)?;
+        self.dfu_dnload(&data, 1)?;
         self.dfu_getstatus()?;
 
         let data = vec![0u8; 0x100];
-        self.dfu_dnload(&data)?;
+        self.dfu_dnload(&data, 1)?;
         self.dfu_getstatus()?;
 
         // Send the new bootrom state
-        self.dfu_dnload(bootrom_state.as_bytes())?;
+        self.dfu_dnload(bootrom_state.as_bytes(), 1)?;
         self.dfu_getstatus()?;
 
         // Calculate bytes until end of SRAM
@@ -342,11 +363,11 @@ impl AppleDevice {
 
         let data = vec![0u8; 0x40];
         for _ in 0..loops_needed {
-            self.dfu_dnload(&data)?;
+            self.dfu_dnload(&data, 1)?;
             self.dfu_getstatus()?;
         }
         let data = vec![0u8; 0x30];
-        self.dfu_dnload(&data)?;
+        self.dfu_dnload(&data, 1)?;
         self.dfu_getstatus()?;
 
         // End of SRAM in Nano 7:
@@ -356,7 +377,7 @@ impl AppleDevice {
             0x67, 0x10, 0x58, 0xba, 0x00, 0x00, 0x00, 0x00, 0x80, 0xe3, 0x02, 0x22, 0x00, 0xd9,
             0x02, 0x22,
         ];
-        self.dfu_dnload(&overwrite)?;
+        self.dfu_dnload(&overwrite, 1)?;
         self.dfu_getstatus()?;
 
         // Execute overwritten on_upload_callback()
@@ -376,62 +397,79 @@ impl AppleDevice {
         Ok(())
     }
 
-    fn load_image(&self, buffer: &[u8]) -> Result<(), AppleDeviceError> {
-        if self.mode != Mode::DFU {
-            return Err(AppleDeviceError::WrongMode);
-        }
-
-        let img_buffer = if buffer.len() < 0x400 || &buffer[0..4] != b"8740" {
-            log::info!("Adding IMG header to the binary.");
-            Self::add_img_header(buffer)
-        } else {
-            Vec::from(buffer)
-        };
-
-        if img_buffer.len() > MAX_IMAGE_SIZE {
-            log::error!("Binary exceeds the maximum size allowed by the boot ROM. Max: {:#x} Actual: {:#X}",MAX_IMAGE_SIZE, img_buffer.len());
-            return Err(AppleDeviceError::File);
-        }
-
+    fn dfu_load(&self, buffer: &[u8]) -> Result<(), AppleDeviceError> {
         // Send the image in chunks
-        for chunk in img_buffer.chunks(0x800) {
-            self.dfu_dnload(chunk)?;
+        let mut chunk_index = 0;
+        for chunk in buffer.chunks(0x800) {
+            self.dfu_dnload(chunk, chunk_index)?;
+            chunk_index += 1;
 
-            let mut dfu_status = self.dfu_getstatus()?;
-            let mut poll_timeout =
-                u64::from_le_bytes([dfu_status[1], dfu_status[2], dfu_status[3], 0, 0, 0, 0, 0]);
-            let mut state = dfu_status[4];
-
-            // wait in case of dfuDNBUSY
-            while state != 5 {
-                sleep(Duration::from_millis(poll_timeout));
-                dfu_status = self.dfu_getstatus()?;
-                poll_timeout = u64::from_le_bytes([
-                    dfu_status[1],
-                    dfu_status[2],
-                    dfu_status[3],
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                ]);
-                state = dfu_status[4];
+            // Wait in case of dfuDNBUSY
+            loop {
+                let status = self.dfu_getstatus()?;
+                if status[4] != 4 {
+                    break;
+                }
+                let poll_timeout = u32::from_le_bytes([status[1], status[2], status[3], 0]);
+                sleep(Duration::from_millis(poll_timeout.into()));
             }
         }
 
         // Indicate everything has been sent
-        self.dfu_dnload(&[])?;
+        self.dfu_dnload(&[], chunk_index)?;
 
-        let status = self.dfu_getstatus()?;
+        let last_state = loop {
+            let status = self.dfu_getstatus()?;
 
-        if status != [0, 0xB8, 0xB, 0, 7, 0] {
+            // Loop while state is in dfuMANIFEST_SYNC
+            if status[4] != 6 {
+                break status[4];
+            }
+        };
+
+        // Make sure we ended with state in dfuMANIFEST
+        if last_state != 7 {
             // Unknown error when loading the image
-            log::error!("Unexpected DFU status returned when loading the image.");
+            log::error!("Unexpected DFU state '{last_state:#x}' returned when loading the image.");
             return Err(AppleDeviceError::Unknown);
         }
 
+        // Tell U-Boot to exit DFU cmd
+        if self.mode == Mode::UBOOT {
+            let status = self.dfu_getstatus()?;
+            // Make sure state is in dfuIDLE
+            if status[4] != 2 {
+                // Unknown error when loading the image
+                log::error!(
+                    "Unexpected DFU state '{last_state:#x}' returned when loading the image."
+                );
+                return Err(AppleDeviceError::Unknown);
+            }
+            self.dfu_detach()?;
+        }
+
         Ok(())
+    }
+
+    fn load_image(&self, buffer: &[u8]) -> Result<(), AppleDeviceError> {
+        let img_buffer =
+            if self.mode != Mode::UBOOT && (buffer.len() < 0x400 || &buffer[0..4] != b"8740") {
+                log::info!("Adding IMG header to the binary.");
+                Self::add_img_header(buffer)
+            } else {
+                Vec::from(buffer)
+            };
+
+        if self.mode == Mode::DFU && img_buffer.len() > MAX_BOOTLOADER_SIZE {
+            log::error!(
+                "Binary exceeds the maximum size allowed by the boot ROM. Max: {:#x} Actual: {:#X}",
+                MAX_BOOTLOADER_SIZE,
+                img_buffer.len()
+            );
+            return Err(AppleDeviceError::File);
+        }
+
+        self.dfu_load(&img_buffer)
     }
 
     pub fn load_image_from_file(&self, image_path: &str) -> Result<(), AppleDeviceError> {
@@ -439,8 +477,6 @@ impl AppleDevice {
         let mut f = File::open(image_path).map_err(|_| AppleDeviceError::File)?;
         f.read_to_end(&mut image_buffer).unwrap();
 
-        self.load_image(&image_buffer)?;
-
-        Ok(())
+        self.load_image(&image_buffer)
     }
 }
