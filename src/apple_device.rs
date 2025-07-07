@@ -81,7 +81,7 @@ impl From<u16> for Mode {
             0x1249 => Mode::WTF,
             0x124A => Mode::WTF,
             0x1267 => Mode::DISK,
-            0x1288 => Mode::UBOOT,
+            0x8007 => Mode::UBOOT,
             _ => Mode::Unknown(value),
         }
     }

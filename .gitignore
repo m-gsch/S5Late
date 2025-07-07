@@ -1,2 +1,3 @@
 /target
 Cargo.lock
+/assets/kernel_fdt.itb
